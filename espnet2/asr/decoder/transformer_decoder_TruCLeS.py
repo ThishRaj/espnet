@@ -9,7 +9,7 @@ from typeguard import check_argument_types
 
 from espnet2.asr.decoder.abs_decoder import AbsDecoder
 from espnet.nets.pytorch_backend.nets_utils import make_pad_mask
-from espnet.nets.pytorch_backend.transformer.attention import MultiHeadedAttention
+from espnet.nets.pytorch_backend.transformer.attention_TruCLeS import MultiHeadedAttention
 from espnet.nets.pytorch_backend.transformer.decoder_layer_TruCLeS import DecoderLayer
 from espnet.nets.pytorch_backend.transformer.dynamic_conv import DynamicConvolution
 from espnet.nets.pytorch_backend.transformer.dynamic_conv2d import DynamicConvolution2D
@@ -93,8 +93,8 @@ class BaseTransformerDecoder(AbsDecoder, BatchScorerInterface):
         # ADDING FOR TRUCLES OUTPUTS
         self.train_softmax = None
         self.train_decoder = None
-        self.decoder = []
-        self.softmax = []
+        # self.decoder = []
+        # self.softmax = []
 
     def forward(
         self,
@@ -126,10 +126,13 @@ class BaseTransformerDecoder(AbsDecoder, BatchScorerInterface):
         tgt = ys_in_pad
         # tgt_mask: (B, 1, L)
         tgt_mask = (~make_pad_mask(ys_in_lens)[:, None, :]).to(tgt.device)
+        #print(f"Target mask: {tgt_mask.shape}\n {tgt_mask}")
         # m: (1, L, L)
         m = subsequent_mask(tgt_mask.size(-1), device=tgt_mask.device).unsqueeze(0)
+        #print(f"Subsequent mask: {m.shape}\n {m}")
         # tgt_mask: (B, L, L)
         tgt_mask = tgt_mask & m
+        # print(f"Total mask: {tgt_mask.shape} \n {tgt_mask}]")
 
         memory = hs_pad
         memory_mask = (~make_pad_mask(hlens, maxlen=memory.size(1)))[:, None, :].to(
@@ -143,6 +146,7 @@ class BaseTransformerDecoder(AbsDecoder, BatchScorerInterface):
             )
 
         x = self.embed(tgt)
+        # Forward one step calls decoders with memory_mask = None -> Why?
         x, tgt_mask, memory, memory_mask = self.decoders(
             x, tgt_mask, memory, memory_mask
         )
@@ -210,8 +214,61 @@ class BaseTransformerDecoder(AbsDecoder, BatchScorerInterface):
         if self.output_layer is not None:
             y = torch.log_softmax(self.output_layer(y), dim=-1)
         # ADDING FOR TRUCLES
-        self.decoder.append(decoder.decoder_attn_output)
-        self.softmax.append(y)
+        # self.decoder.append(decoder.decoder_attn_output)
+        # self.softmax.append(y)
+        
+        if return_hs:
+            return y, h_asr, new_cache
+        return y, new_cache
+
+    def forward_TruCLeS(
+        self,
+        tgt: torch.Tensor,
+        tgt_mask: torch.Tensor,
+        memory: torch.Tensor,
+        cache: List[torch.Tensor] = None,
+        return_hs: bool = False,
+    ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+        """Forward one step.
+
+        Args:
+            tgt: input token ids, int64 (batch, maxlen_out)
+            tgt_mask: input token mask,  (batch, maxlen_out)
+                      dtype=torch.uint8 in PyTorch 1.2-
+                      dtype=torch.bool in PyTorch 1.2+ (include 1.2)
+            memory: encoded memory, float32  (batch, maxlen_in, feat)
+            cache: cached output list of (batch, max_time_out-1, size)
+            return_hs: dec hidden state corresponding to ys,
+                used for searchable hidden ints
+        Returns:
+            y, cache: NN output value and cache per `self.decoders`.
+            y.shape` is (batch, maxlen_out, token)
+        """
+        x = self.embed(tgt)
+        if cache is None:
+            cache = [None] * len(self.decoders)
+        new_cache = []
+        for c, decoder in zip(cache, self.decoders):
+            x, tgt_mask, memory, memory_mask = decoder(
+                x, tgt_mask, memory, None, cache=c
+            )
+            new_cache.append(x)
+            # if self.decoder == None:  
+            #     self.decoder = decoder.decoder_attn_output
+            # else:
+            #     self.decoder = torch.cat((self.decoder,decoder.decoder_attn_output))
+	    
+        if self.normalize_before:
+            y = self.after_norm(x[:, -1])
+        else:
+            y = x[:, -1]
+        if return_hs:
+            h_asr = y
+        if self.output_layer is not None:
+            y = self.output_layer(y)
+        # ADDING FOR TRUCLES
+        # self.decoder.append(decoder.decoder_attn_output)
+        # self.softmax.append(y)
         
         if return_hs:
             return y, h_asr, new_cache

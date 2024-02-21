@@ -158,6 +158,7 @@ class DecoderLayer(nn.Module):
             )
             x = residual + self.concat_linear2(x_concat)
         else:
+            # print(f"Inside espnet.nets.pytorch_backend.transformer.decoder_layer_TruCLeS DecoderLayer.forward() \n {x.shape}, {memory.shape}, {memory_mask.shape}")
             x = residual + self.dropout(self.src_attn(x, memory, memory, memory_mask))
             
         # ADDING FOR TRUCLES

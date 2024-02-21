@@ -368,7 +368,7 @@ class ESPnetASRModel(AbsESPnetModel):
         self, speech: torch.Tensor, speech_lengths: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Frontend + Encoder. Note that this method is used by asr_inference.py
-
+        
         Args:
             speech: (Batch, Length, ...)
             speech_lengths: (Batch, )
@@ -429,21 +429,110 @@ class ESPnetASRModel(AbsESPnetModel):
 
         return encoder_out, encoder_out_lens
 
+    def frontend_aug_TruCLeS(
+        self, 
+        speech: torch.Tensor, 
+        speech_lengths: torch.Tensor, 
+        training : bool = True
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Frontend. Note that this method is used by TruCLeS inference.
+        
+        Args:
+            speech: (Batch, Length, ...)
+            speech_lengths: (Batch, )
+        """
+        
+        with autocast(False):
+            # 1. Extract feats
+            feats, feats_lengths = self._extract_feats(speech, speech_lengths)
+
+            # 2. Data augmentation
+            if self.specaug is not None and training:
+                feats, feats_lengths = self.specaug(feats, feats_lengths)
+
+            # 3. Normalization for feature: e.g. Global-CMVN, Utterance-CMVN
+            if self.normalize is not None:
+                feats, feats_lengths = self.normalize(feats, feats_lengths)
+
+        return feats, feats_lengths
+
+    def encode_TruCLeS(
+        self, 
+        feats: torch.Tensor, 
+        feats_lengths: torch.Tensor,
+        apply_frontend: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """(Frontend +) Encoder. Note that this method is used built for use with TruCLeS
+        
+        Args:
+            feats: (Batch, feat_dim, Length, ...)
+            feats_lengths: (Batch, )
+        """
+        if apply_frontend:
+            with autocast(False):
+                # 1. Extract feats
+                feats, feats_lengths = self._extract_feats(feats, feats_lengths)
+    
+                # 2. Data augmentation
+                if self.specaug is not None and self.training:
+                    feats, feats_lengths = self.specaug(feats, feats_lengths)
+    
+                # 3. Normalization for feature: e.g. Global-CMVN, Utterance-CMVN
+                if self.normalize is not None:
+                    feats, feats_lengths = self.normalize(feats, feats_lengths)
+
+        # Pre-encoder, e.g. used for raw input data
+        if self.preencoder is not None:
+            feats, feats_lengths = self.preencoder(feats, feats_lengths)
+
+        # 4. Forward encoder
+        # feats: (Batch, Length, Dim)
+        # -> encoder_out: (Batch, Length2, Dim2)
+        if self.encoder.interctc_use_conditioning or getattr(
+            self.encoder, "ctc_trim", False
+        ):
+            encoder_out, encoder_out_lens, _ = self.encoder(
+                feats, feats_lengths, ctc=self.ctc
+            )
+        else:
+            encoder_out, encoder_out_lens, _ = self.encoder(feats, feats_lengths)
+        intermediate_outs = None
+        if isinstance(encoder_out, tuple):
+            intermediate_outs = encoder_out[1]
+            encoder_out = encoder_out[0]
+
+        # Post-encoder, e.g. NLU
+        if self.postencoder is not None:
+            encoder_out, encoder_out_lens = self.postencoder(
+                encoder_out, encoder_out_lens
+            )
+
+        assert encoder_out.size(0) == feats.size(0), (
+            encoder_out.size(),
+            feats.size(0),
+        )
+        if (
+            getattr(self.encoder, "selfattention_layer_type", None) != "lf_selfattn"
+            and not self.is_encoder_whisper
+        ):
+            assert encoder_out.size(-2) <= encoder_out_lens.max(), (
+                encoder_out.size(),
+                encoder_out_lens.max(),
+            )
+
+        if intermediate_outs is not None:
+            return (encoder_out, intermediate_outs), encoder_out_lens
+
+        return encoder_out, encoder_out_lens
+
     def decode_TruCLeS(
         self,
         encoder_out: torch.Tensor,
         encoder_out_lens: torch.Tensor,
-        text: torch.Tensor,
-        text_lengths: torch.Tensor,
-    ):
-
-        text[text == -1] = self.ignore_id
-
-        # for data-parallel
-        text = text[:, : text_lengths.max()]
-        
-        ys_pad = text
-        ys_pad_lens = text_lengths
+        ys_in_pad: torch.Tensor,
+        ys_in_lens: torch.Tensor,
+        max_len: bool = 100,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         
         if hasattr(self, "lang_token_id") and self.lang_token_id is not None:
             ys_pad = torch.cat(
@@ -456,8 +545,8 @@ class ESPnetASRModel(AbsESPnetModel):
             ys_pad_lens += 1
         
 
-        ys_in_pad, ys_out_pad = add_sos_eos(ys_pad, self.sos, self.eos, self.ignore_id)
-        ys_in_lens = ys_pad_lens + 1
+        # ys_in_pad, ys_out_pad = add_sos_eos(ys_pad, self.sos, self.eos, self.ignore_id)
+        # ys_in_lens = ys_pad_lens + 1
 
         # 1. Forward decoder
         decoder_out, _ = self.decoder(
@@ -466,7 +555,7 @@ class ESPnetASRModel(AbsESPnetModel):
         
         ys_hat = decoder_out.argmax(dim=-1)
         
-        return ys_hat, ys_pad_lens, decoder_out 
+        return ys_hat, ys_in_lens, decoder_out 
     
     def _extract_feats(
         self, speech: torch.Tensor, speech_lengths: torch.Tensor
