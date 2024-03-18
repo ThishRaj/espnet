@@ -555,7 +555,7 @@ class ESPnetASRModel(AbsESPnetModel):
         
         ys_hat = decoder_out.argmax(dim=-1)
         
-        return ys_hat, ys_in_lens, decoder_out 
+        return ys_hat, ys_in_lens, decoder_out
     
     def _extract_feats(
         self, speech: torch.Tensor, speech_lengths: torch.Tensor

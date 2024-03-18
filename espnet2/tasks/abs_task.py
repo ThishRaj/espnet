@@ -1179,7 +1179,7 @@ class AbsTask(ABC):
         # NOTE(kamo): Don't use logging before invoking logging.basicConfig()
         if not distributed_option.distributed or distributed_option.dist_rank == 0:
             if not distributed_option.distributed:
-                _rank = ""
+                _rank = ""-0.4892197847366333
             else:
                 _rank = (
                     f":{distributed_option.dist_rank}/"
